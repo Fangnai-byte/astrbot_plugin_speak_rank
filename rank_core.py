@@ -1,0 +1,176 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+群发言榜统计 - 核心逻辑（纯 Python，无 AstrBot 依赖，便于独立自测）
+
+存储：sqlite3，按 (群号, QQ号, 日期) 聚合当日发言条数。
+统计口径：
+  - 今日榜：day == 今天
+  - 本周榜：day >= 本周一（周一为一周起点）
+  - 累计榜：全部历史
+昵称：取该统计范围内该用户最近一次发言时记录的昵称（按 ts）。
+"""
+import os
+import re
+import sqlite3
+import threading
+import time
+from datetime import date, timedelta
+
+DB_REL_PATH = os.path.join("data", "speak_rank.db")
+MAX_NAME_LEN = 32
+
+
+class SpeakRankStore:
+    """发言计数存储。所有方法线程安全（锁 + 每操作独立连接）。"""
+
+    def __init__(self, plugin_dir: str):
+        self.db_path = os.path.join(plugin_dir, DB_REL_PATH)
+        os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
+        self._lock = threading.Lock()
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(
+                    """CREATE TABLE IF NOT EXISTS msg_stats(
+                        group_id TEXT NOT NULL,
+                        user_id  TEXT NOT NULL,
+                        user_name TEXT NOT NULL DEFAULT '',
+                        day      TEXT NOT NULL,
+                        cnt      INTEGER NOT NULL DEFAULT 0,
+                        ts       INTEGER NOT NULL DEFAULT 0,
+                        PRIMARY KEY (group_id, user_id, day)
+                    )"""
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_stats_group_day "
+                    "ON msg_stats(group_id, day)"
+                )
+
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+        except sqlite3.Error:
+            pass
+        return conn
+
+    # ---------------- 写入 ----------------
+    def record(self, group_id: str, user_id: str, user_name: str,
+               day: str | None = None, ts: int | None = None) -> None:
+        """某条发言 +1。day 格式 YYYY-MM-DD，缺省取本地当天；ts 为发言时间戳。"""
+        day = day or date.today().isoformat()
+        ts = ts if ts is not None else int(time.time())
+        name = (user_name or user_id).strip()[:MAX_NAME_LEN]
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(
+                    """INSERT INTO msg_stats(group_id, user_id, user_name, day, cnt, ts)
+                       VALUES(:g, :u, :n, :d, 1, :t)
+                       ON CONFLICT(group_id, user_id, day)
+                       DO UPDATE SET cnt = cnt + 1,
+                                     user_name = excluded.user_name,
+                                     ts = excluded.ts""",
+                    {"g": str(group_id), "u": str(user_id), "n": name,
+                     "d": day, "t": int(ts)},
+                )
+
+    # ---------------- 查询 ----------------
+    def _rank(self, group_id: str, top_n: int, start_day: str | None,
+              end_day: str | None) -> list[tuple[str, str, int]]:
+        """返回 [(user_id, user_name, cnt), ...] 按 cnt 降序（同分按 user_id）。
+        昵称取范围内最近一次发言所记录的昵称。"""
+        gid = str(group_id)
+        lim = int(top_n)
+        if start_day is None:
+            sql = (
+                "WITH agg AS ("
+                "  SELECT user_id, SUM(cnt) AS c, MAX(ts) AS mt"
+                "  FROM msg_stats WHERE group_id = :gid"
+                "  GROUP BY user_id)"
+                "SELECT agg.user_id, COALESCE(nm.user_name, agg.user_id), agg.c"
+                " FROM agg"
+                " LEFT JOIN msg_stats nm"
+                "   ON nm.group_id = :gid2 AND nm.user_id = agg.user_id"
+                "  AND nm.ts = agg.mt"
+                " ORDER BY agg.c DESC, agg.user_id LIMIT :lim"
+            )
+            params = {"gid": gid, "gid2": gid, "lim": lim}
+        else:
+            sql = (
+                "WITH agg AS ("
+                "  SELECT user_id, SUM(cnt) AS c, MAX(ts) AS mt"
+                "  FROM msg_stats WHERE group_id = :gid"
+                "   AND day BETWEEN :s AND :e"
+                "  GROUP BY user_id)"
+                "SELECT agg.user_id, COALESCE(nm.user_name, agg.user_id), agg.c"
+                " FROM agg"
+                " LEFT JOIN msg_stats nm"
+                "   ON nm.group_id = :gid2 AND nm.user_id = agg.user_id"
+                "  AND nm.ts = agg.mt"
+                " ORDER BY agg.c DESC, agg.user_id LIMIT :lim"
+            )
+            params = {"gid": gid, "gid2": gid, "s": start_day,
+                      "e": end_day, "lim": lim}
+        with self._lock:
+            with self._connect() as conn:
+                rows = conn.execute(sql, params).fetchall()
+        return [(r[0], r[1] or r[0], int(r[2])) for r in rows]
+
+    def today_rank(self, group_id: str, top_n: int,
+                   today: date | None = None) -> list[tuple[str, str, int]]:
+        today = today or date.today()
+        return self._rank(group_id, top_n, today.isoformat(), today.isoformat())
+
+    def week_rank(self, group_id: str, top_n: int,
+                  today: date | None = None) -> list[tuple[str, str, int]]:
+        today = today or date.today()
+        monday = today - timedelta(days=today.weekday())
+        return self._rank(group_id, top_n, monday.isoformat(), today.isoformat())
+
+    def total_rank(self, group_id: str, top_n: int) -> list[tuple[str, str, int]]:
+        return self._rank(group_id, top_n, None, None)
+
+
+# ---------------- 消息解析 ----------------
+_WS_RE = re.compile(r"\s+")
+
+SCOPE_LABEL = {"day": "今日", "week": "本周", "total": "累计"}
+
+
+def normalize_text(text: str) -> str:
+    """去空白，方便关键词匹配。"""
+    return _WS_RE.sub("", text or "")
+
+
+def match_scope(text_norm: str) -> str:
+    """从去空白文本里识别统计口径：day / week / total，缺省 day。"""
+    if "累计" in text_norm or "总" in text_norm:
+        return "total"
+    if "周" in text_norm:
+        return "week"
+    return "day"
+
+
+def is_trigger(text_norm: str, triggers: list[str]) -> bool:
+    """是否命中任一触发关键词。triggers 为空时按内置词表兜底。"""
+    words = [str(t).strip() for t in (triggers or []) if str(t).strip()]
+    words = words or ["发言榜", "水群榜"]
+    return any(w in text_norm for w in words)
+
+
+# ---------------- 榜单排版 ----------------
+def build_rank_text(scope: str, rows: list[tuple[str, str, int]],
+                    top_n: int) -> str:
+    """拼出可发送的榜单文本。标题刻意不含触发词（如「发言榜」），
+    避免榜单消息被引用/复读时再次触发查询造成循环。"""
+    label = SCOPE_LABEL.get(scope, "今日")
+    shown = min(len(rows), max(int(top_n), 1))
+    lines = [f"【{label}发言 TOP{shown}】"]
+    if not rows:
+        lines.append(f"{label}还没有人发言喵～")
+        return "\n".join(lines)
+    for i, (uid, name, cnt) in enumerate(rows, 1):
+        show = name if name != uid else f"{uid}（未备注）"
+        lines.append(f"{i}. {show}：{cnt} 条")
+    return "\n".join(lines)

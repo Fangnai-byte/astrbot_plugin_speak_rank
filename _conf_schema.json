@@ -1,0 +1,32 @@
+{
+  "top_n": {
+    "description": "榜单显示条数",
+    "hint": "查询发言榜时最多展示的人数。",
+    "type": "int",
+    "default": 10
+  },
+  "trigger_words": {
+    "description": "触发关键词",
+    "hint": "群消息里包含任一关键词即触发播报，逐条点「添加」。内置兜底词：发言榜、水群榜。",
+    "type": "list",
+    "default": []
+  },
+  "include_bot": {
+    "description": "机器人自身发言是否计入榜单",
+    "hint": "默认 true：机器人的发言也统计（自己发言不需要排除）。关闭后机器人发言不计入，但永远不会自己触发查询。",
+    "type": "bool",
+    "default": true
+  },
+  "bot_display_name": {
+    "description": "机器人上榜时的显示名",
+    "hint": "框架把机器人自身发言的昵称记作 bot，展示时统一替换成这个名字。默认：绫地宁宁。",
+    "type": "string",
+    "default": "绫地宁宁"
+  },
+  "exclude_user_ids": {
+    "description": "不计入榜单的 QQ 号",
+    "hint": "这些人的发言不计数（但仍可触发查询），逗号或列表形式。",
+    "type": "list",
+    "default": []
+  }
+}
