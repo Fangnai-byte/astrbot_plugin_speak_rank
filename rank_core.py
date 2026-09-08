@@ -131,11 +131,24 @@ class SpeakRankStore:
     def total_rank(self, group_id: str, top_n: int) -> list[tuple[str, str, int]]:
         return self._rank(group_id, top_n, None, None)
 
+    def date_rank(self, group_id: str, top_n: int,
+                  day: date) -> list[tuple[str, str, int]]:
+        """指定某一自然日（本地时区，按 day 列聚合）的 TOP。"""
+        return self._rank(group_id, top_n, day.isoformat(), day.isoformat())
+
 
 # ---------------- 消息解析 ----------------
 _WS_RE = re.compile(r"\s+")
 
 SCOPE_LABEL = {"day": "今日", "week": "本周", "total": "累计"}
+DATE_SCOPE_PREFIX = "date:"
+# 相对日期词 → 距今天数
+_DAY_OFFSET_WORDS = {
+    "前天": 2,
+    "前日": 2,
+    "昨日": 1,
+    "昨天": 1,
+}
 
 
 def normalize_text(text: str) -> str:
@@ -143,12 +156,55 @@ def normalize_text(text: str) -> str:
     return _WS_RE.sub("", text or "")
 
 
-def match_scope(text_norm: str) -> str:
-    """从去空白文本里识别统计口径：day / week / total，缺省 day。"""
+def _target_date(text_norm: str, today: date | None = None) -> date | None:
+    """从去空白文本解析目标日期：昨日/昨天、前天/前日、
+    X月X日、XXXX年X月X日、YYYY-MM-DD 等；解析不到返回 None。
+    """
+    today = today or date.today()
+    for word, offset in _DAY_OFFSET_WORDS.items():
+        if word in text_norm:
+            return today - timedelta(days=offset)
+    # 完整年-月-日：2026-09-07 / 2026/9/7 / 2026.9.7 / 2026年9月7日
+    m = re.search(
+        r"(?P<y>\d{4})\s*[年\-/.]\s*(?P<mo>\d{1,2})\s*[月\-/.]\s*(?P<d>\d{1,2})日?",
+        text_norm)
+    if m:
+        try:
+            return date(int(m.group("y")), int(m.group("mo")),
+                        int(m.group("d")))
+        except ValueError:
+            return None
+    # 仅月-日：9月7日（默认今年）
+    m = re.search(r"(?P<mo>\d{1,2})\s*月\s*(?P<d>\d{1,2})\s*日", text_norm)
+    if m:
+        try:
+            return date(today.year, int(m.group("mo")), int(m.group("d")))
+        except ValueError:
+            return None
+    return None
+
+
+def scope_label(scope: str) -> str:
+    """把 scope 转成榜单标题用的中文标签（如「9月7日」）。"""
+    if scope.startswith(DATE_SCOPE_PREFIX):
+        try:
+            d = date.fromisoformat(scope[len(DATE_SCOPE_PREFIX):])
+        except ValueError:
+            return "指定日"
+        label = f"{d.month}月{d.day}日"
+        return f"{d.year}年{label}" if d.year != date.today().year else label
+    return SCOPE_LABEL.get(scope, "今日")
+
+
+def match_scope(text_norm: str, today: date | None = None) -> str:
+    """识别统计口径：day / week / total / date:YYYY-MM-DD，缺省 day。"""
     if "累计" in text_norm or "总" in text_norm:
         return "total"
     if "周" in text_norm:
         return "week"
+    d = _target_date(text_norm, today)
+    if d is not None:
+        return f"{DATE_SCOPE_PREFIX}{d.isoformat()}"
     return "day"
 
 
@@ -164,7 +220,7 @@ def build_rank_text(scope: str, rows: list[tuple[str, str, int]],
                     top_n: int) -> str:
     """拼出可发送的榜单文本。标题刻意不含触发词（如「发言榜」），
     避免榜单消息被引用/复读时再次触发查询造成循环。"""
-    label = SCOPE_LABEL.get(scope, "今日")
+    label = scope_label(scope)
     shown = min(len(rows), max(int(top_n), 1))
     lines = [f"【{label}发言 TOP{shown}】"]
     if not rows:

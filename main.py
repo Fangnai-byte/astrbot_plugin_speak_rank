@@ -7,11 +7,13 @@ Speak Rank (群发言榜) - AstrBot 插件
 「累计发言榜」，或直接「发言榜」默认今日）即可查看本群排行。
 
 - 统计范围：当前群（按群独立统计）
-- 统计口径：今日 / 本周(周一起) / 累计，sqlite 落盘，重启不丢
+- 统计口径：今日 / 昨日 / 前天 / 指定日期(如 9月7日) / 本周(周一起) /
+  累计，sqlite 落盘，重启不丢
 - 机器人自身发言：默认也计入（include_bot=true）；机器人自己的消息
   不会触发查询，避免自我循环
 """
 import os
+from datetime import date
 
 from astrbot.api import logger
 from astrbot.api.event import filter, AstrMessageEvent
@@ -88,12 +90,16 @@ class SpeakRankPlugin(Star):
             if not text or not is_trigger(text, triggers):
                 return
 
-            # 3) 查询并播报
+            # 3) 查询并播报（date:YYYY-MM-DD = 指定日期）
             scope = match_scope(text)
             if scope == "week":
                 rows = self.store.week_rank(group_id, self._top_n())
             elif scope == "total":
                 rows = self.store.total_rank(group_id, self._top_n())
+            elif scope.startswith("date:"):
+                rows = self.store.date_rank(
+                    group_id, self._top_n(),
+                    date.fromisoformat(scope[len("date:"):]))
             else:
                 rows = self.store.today_rank(group_id, self._top_n())
             bot_name = self._bot_display_name()
