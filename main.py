@@ -74,8 +74,13 @@ class SpeakRankPlugin(Star):
             # 1) 计数（默认含机器人自身）
             if (is_bot and not self._include_bot()) or user_id in self._excluded_ids():
                 return  # 不计入
-            self.store.record(group_id, user_id,
-                              event.get_sender_name() or user_id)
+            # 机器人自身发言：显示名固定取 bot_display_name（默认绫地宁宁），
+            # 避免框架落库昵称为空/占位导致榜单显示「未备注」
+            if is_bot:
+                name = self._bot_display_name()
+            else:
+                name = event.get_sender_name() or user_id
+            self.store.record(group_id, user_id, name)
 
             # 2) 机器人自己的消息永不触发查询（防自我循环）
             if is_bot:
