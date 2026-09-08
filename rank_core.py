@@ -82,36 +82,61 @@ class SpeakRankStore:
         昵称取范围内最近一次发言所记录的昵称。"""
         gid = str(group_id)
         lim = int(top_n)
+        # 昵称有效性：排除协议端纯数字占位/空串/框架占位串，避免上榜显示「未备注」。
+        # 取名优先级：统计范围内最近一次有效昵称 -> 全历史最近一次有效昵称 -> QQ号。
+        valid = (
+            "TRIM(user_name) != ''"
+            " AND TRIM(user_name) NOT GLOB '[0-9]*'"
+            " AND LOWER(TRIM(user_name)) NOT IN"
+            " ('n/a','未备注','未知','无名氏','bot','null','none')"
+        )
         if start_day is None:
-            sql = (
-                "WITH agg AS ("
-                "  SELECT user_id, SUM(cnt) AS c, MAX(ts) AS mt"
-                "  FROM msg_stats WHERE group_id = :gid"
-                "  GROUP BY user_id)"
-                "SELECT agg.user_id, COALESCE(nm.user_name, agg.user_id), agg.c"
-                " FROM agg"
-                " LEFT JOIN msg_stats nm"
-                "   ON nm.group_id = :gid2 AND nm.user_id = agg.user_id"
-                "  AND nm.ts = agg.mt"
-                " ORDER BY agg.c DESC, agg.user_id LIMIT :lim"
-            )
-            params = {"gid": gid, "gid2": gid, "lim": lim}
+            sql = f"""
+WITH agg AS (
+  SELECT user_id, SUM(cnt) AS c
+  FROM msg_stats WHERE group_id = :gid GROUP BY user_id
+),
+named AS (
+  SELECT user_id, user_name,
+         ROW_NUMBER() OVER (PARTITION BY user_id
+                            ORDER BY ts DESC, day DESC) AS rn
+  FROM msg_stats WHERE group_id = :gid AND {valid}
+)
+SELECT agg.user_id, COALESCE(named.user_name, agg.user_id), agg.c
+FROM agg
+LEFT JOIN named ON named.user_id = agg.user_id AND named.rn = 1
+ORDER BY agg.c DESC, agg.user_id LIMIT :lim
+"""
+            params = {"gid": gid, "lim": lim}
         else:
-            sql = (
-                "WITH agg AS ("
-                "  SELECT user_id, SUM(cnt) AS c, MAX(ts) AS mt"
-                "  FROM msg_stats WHERE group_id = :gid"
-                "   AND day BETWEEN :s AND :e"
-                "  GROUP BY user_id)"
-                "SELECT agg.user_id, COALESCE(nm.user_name, agg.user_id), agg.c"
-                " FROM agg"
-                " LEFT JOIN msg_stats nm"
-                "   ON nm.group_id = :gid2 AND nm.user_id = agg.user_id"
-                "  AND nm.ts = agg.mt"
-                " ORDER BY agg.c DESC, agg.user_id LIMIT :lim"
-            )
-            params = {"gid": gid, "gid2": gid, "s": start_day,
-                      "e": end_day, "lim": lim}
+            sql = f"""
+WITH agg AS (
+  SELECT user_id, SUM(cnt) AS c
+  FROM msg_stats WHERE group_id = :gid
+   AND day BETWEEN :s AND :e GROUP BY user_id
+),
+inrange AS (
+  SELECT user_id, user_name,
+         ROW_NUMBER() OVER (PARTITION BY user_id
+                            ORDER BY ts DESC, day DESC) AS rn
+  FROM msg_stats WHERE group_id = :gid
+   AND day BETWEEN :s AND :e AND {valid}
+),
+history AS (
+  SELECT user_id, user_name,
+         ROW_NUMBER() OVER (PARTITION BY user_id
+                            ORDER BY ts DESC, day DESC) AS rn
+  FROM msg_stats WHERE group_id = :gid AND {valid}
+)
+SELECT agg.user_id,
+       COALESCE(inrange.user_name, history.user_name, agg.user_id),
+       agg.c
+FROM agg
+LEFT JOIN inrange ON inrange.user_id = agg.user_id AND inrange.rn = 1
+LEFT JOIN history ON history.user_id = agg.user_id AND history.rn = 1
+ORDER BY agg.c DESC, agg.user_id LIMIT :lim
+"""
+            params = {"gid": gid, "s": start_day, "e": end_day, "lim": lim}
         with self._lock:
             with self._connect() as conn:
                 rows = conn.execute(sql, params).fetchall()

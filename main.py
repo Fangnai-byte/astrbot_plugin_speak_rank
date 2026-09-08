@@ -103,7 +103,8 @@ class SpeakRankPlugin(Star):
             else:
                 rows = self.store.today_rank(group_id, self._top_n())
             bot_name = self._bot_display_name()
-            rows = [(u, bot_name if n == "bot" else n, c)
+            self_id = str(event.get_self_id() or "")
+            rows = [(u, bot_name if (n == "bot" or u == self_id) else n, c)
                     for u, n, c in rows]
             yield event.plain_result(
                 build_rank_text(scope, rows, self._top_n())

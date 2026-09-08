@@ -2,7 +2,7 @@ name: astrbot_plugin_speak_rank
 display_name: Speak Rank (群发言榜)
 desc: 群内发关键词即可查看本群发言排行：今日 / 昨日 / 前天 / 指定日期(如 9月7日) / 本周(周一起) / 累计，机器人发言默认也计入
 help: 在群里发送「发言榜」（默认今日）、「今日发言榜」、「昨日发言榜」、「前天发言榜」、「9月7日发言榜」、「2026-09-07 发言榜」、「本周发言榜」、「累计发言榜」即可查看本群对应时间范围的发言 TOP 榜。
-version: 1.1.0
+version: 1.1.1
 author: 綾地 寧々&Fangnai-byte
 repo: "https://github.com/Fangnai-byte/astrbot_plugin_speak_rank"
 logo: "https://raw.githubusercontent.com/Fangnai-byte/astrbot_plugin_speak_rank/main/logo.png"
