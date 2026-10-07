@@ -6,6 +6,7 @@
 存储：sqlite3，按 (群号, QQ号, 日期) 聚合当日发言条数。
 统计口径：
   - 今日榜：day == 今天
+  - 近 N 天榜：day >= 今天-(N-1)（含今天，共 N 个自然日）
   - 本周榜：day >= 本周一（周一为一周起点）
   - 累计榜：全部历史
 昵称：取该统计范围内该用户最近一次发言时记录的昵称（按 ts）。
@@ -161,12 +162,27 @@ ORDER BY agg.c DESC, agg.user_id LIMIT :lim
         """指定某一自然日（本地时区，按 day 列聚合）的 TOP。"""
         return self._rank(group_id, top_n, day.isoformat(), day.isoformat())
 
+    def recent_rank(self, group_id: str, top_n: int, days: int = 7,
+                    today: date | None = None) -> list[tuple[str, str, int]]:
+        """近 N 天（含今天，共 N 个自然日）的 TOP。"""
+        today = today or date.today()
+        try:
+            n = int(days)
+        except (TypeError, ValueError):
+            n = 1
+        n = max(1, min(n, MAX_RECENT_DAYS))
+        start = today - timedelta(days=n - 1)
+        return self._rank(group_id, top_n, start.isoformat(), today.isoformat())
+
 
 # ---------------- 消息解析 ----------------
 _WS_RE = re.compile(r"\s+")
 
 SCOPE_LABEL = {"day": "今日", "week": "本周", "total": "累计"}
 DATE_SCOPE_PREFIX = "date:"
+RECENT_SCOPE_PREFIX = "recent:"
+# 近 N 天的 N 上限（约十年，防手滑输入超大数字把区间撑爆）
+MAX_RECENT_DAYS = 3650
 # 相对日期词 → 距今天数
 _DAY_OFFSET_WORDS = {
     "前天": 2,
@@ -174,6 +190,44 @@ _DAY_OFFSET_WORDS = {
     "昨日": 1,
     "昨天": 1,
 }
+# 「近n天 / 最近n天 / 过去n天」，n 支持阿拉伯数字或中文数字（近三天）
+_RECENT_RE = re.compile(
+    r"(?:近|最近|过去)\s*(?P<n>\d{1,4}|[零〇一二两三四五六七八九十百]+)"
+    r"\s*(?:天|日)")
+_CN_DIGITS = {"零": 0, "〇": 0, "一": 1, "二": 2, "两": 2, "三": 3,
+              "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+
+
+def _to_int(raw: str) -> int | None:
+    """把「3」「三」「十二」「三十」这类写法转成整数，失败返回 None。"""
+    if not raw:
+        return None
+    if raw.isdigit():
+        return int(raw)
+    total, num = 0, 0
+    for ch in raw:
+        if ch in _CN_DIGITS:
+            num = _CN_DIGITS[ch]
+        elif ch == "十":
+            total += (num or 1) * 10
+            num = 0
+        elif ch == "百":
+            total += (num or 1) * 100
+            num = 0
+        else:
+            return None
+    return total + num
+
+
+def parse_recent_days(text_norm: str) -> int | None:
+    """从去空白文本解析「近 N 天」的 N（1..MAX_RECENT_DAYS），无则 None。"""
+    m = _RECENT_RE.search(text_norm or "")
+    if not m:
+        return None
+    n = _to_int(m.group("n"))
+    if n is None:
+        return None
+    return max(1, min(n, MAX_RECENT_DAYS))
 
 
 def normalize_text(text: str) -> str:
@@ -210,7 +264,10 @@ def _target_date(text_norm: str, today: date | None = None) -> date | None:
 
 
 def scope_label(scope: str) -> str:
-    """把 scope 转成榜单标题用的中文标签（如「9月7日」）。"""
+    """把 scope 转成榜单标题用的中文标签（如「9月7日」「近7天」）。"""
+    if scope.startswith(RECENT_SCOPE_PREFIX):
+        n = scope[len(RECENT_SCOPE_PREFIX):]
+        return f"近{n}天" if n.isdigit() else "近N天"
     if scope.startswith(DATE_SCOPE_PREFIX):
         try:
             d = date.fromisoformat(scope[len(DATE_SCOPE_PREFIX):])
@@ -222,9 +279,13 @@ def scope_label(scope: str) -> str:
 
 
 def match_scope(text_norm: str, today: date | None = None) -> str:
-    """识别统计口径：day / week / total / date:YYYY-MM-DD，缺省 day。"""
+    """识别统计口径：day / recent:N / week / total / date:YYYY-MM-DD，
+    缺省 day。"""
     if "累计" in text_norm or "总" in text_norm:
         return "total"
+    n = parse_recent_days(text_norm)
+    if n is not None:
+        return f"{RECENT_SCOPE_PREFIX}{n}"
     if "周" in text_norm:
         return "week"
     d = _target_date(text_norm, today)
