@@ -294,11 +294,59 @@ def match_scope(text_norm: str, today: date | None = None) -> str:
     return "day"
 
 
-def is_trigger(text_norm: str, triggers: list[str]) -> bool:
-    """是否命中任一触发关键词。triggers 为空时按内置词表兜底。"""
+# 完全匹配模式下，触发词首尾允许出现的标点（「发言榜？」「！发言榜」）
+_TRIGGER_TRIM = " \t\r\n？！。！？~～…、，,.：:；;\"'“”‘’（）()[]【】"
+
+# 完全匹配模式下，触发词旁边允许出现的「统计口径词」。允许的写法与 match_scope
+# 支持的口径一致：这样「本周发言榜」「近7天发言榜」「9月7日发言榜」照旧能触发，
+# 而「发言榜怎么看」这种只是提到触发词的话不会触发。
+_SCOPE_ONLY_RE = re.compile(
+    r"^(?:"
+    r"今日|今天|本日|"
+    r"昨日|昨天|前日|前天|"
+    r"本周|这周|这星期|周|"
+    r"累计|总榜|总共|总|"
+    r"(?:近|最近|过去)\s*(?:\d{1,4}|[零〇一二两三四五六七八九十百]+)\s*(?:天|日)|"
+    r"\d{4}\s*[-/.年]\s*\d{1,2}\s*[-/.月]\s*\d{1,2}\s*日?|"
+    r"\d{1,2}\s*月\s*\d{1,2}\s*日"
+    r")(?:的)?$"
+)
+
+
+def _trim_trigger_punct(text: str) -> str:
+    """去掉首尾标点/空白，让「发言榜？」也能算完全匹配。"""
+    return (text or "").strip(_TRIGGER_TRIM)
+
+
+def _is_scope_only(rest: str) -> bool:
+    """rest 是否只由统计口径词构成（空串也算：消息就是触发词本身）。"""
+    rest = (rest or "").strip()
+    if not rest:
+        return True
+    return bool(_SCOPE_ONLY_RE.match(rest))
+
+
+def is_trigger(text_norm: str, triggers: list[str], exact: bool = False) -> bool:
+    """是否命中任一触发关键词。triggers 为空时按内置词表兜底。
+
+    exact=False（默认，旧行为）：消息里**包含**任一触发词即触发。
+    exact=True：消息必须**就是**触发词本身，只允许额外带统计口径词
+    （如「本周发言榜」「近7天发言榜」「9月7日发言榜」，首尾标点忽略）；
+    「发言榜怎么看」「我不看发言榜」这类只是提到触发词的消息不再触发。
+    """
     words = [str(t).strip() for t in (triggers or []) if str(t).strip()]
     words = words or ["发言榜", "水群榜"]
-    return any(w in text_norm for w in words)
+    if not exact:
+        return any(w in text_norm for w in words)
+    text = _trim_trigger_punct(text_norm)
+    for w in words:
+        if text == w:
+            return True
+        if text.startswith(w) and _is_scope_only(text[len(w):]):
+            return True
+        if text.endswith(w) and _is_scope_only(text[:len(text) - len(w)]):
+            return True
+    return False
 
 
 # ---------------- 榜单排版 ----------------

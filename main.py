@@ -56,6 +56,10 @@ class SpeakRankPlugin(Star):
         raw = self.config.get("trigger_words", []) or []
         return [str(x).strip() for x in raw if str(x).strip()]
 
+    def _trigger_exact(self) -> bool:
+        """触发词是否必须完全匹配：开启后只有「就是触发词本身」的消息才触发。"""
+        return bool(self.config.get("trigger_exact_match", False))
+
     def _bot_display_name(self) -> str:
         """机器人自身发言在榜上的显示名（框架落库昵称为 bot）。"""
         name = self.config.get("bot_display_name", "") or ""
@@ -87,7 +91,7 @@ class SpeakRankPlugin(Star):
             # 2) 机器人自己的消息永不触发查询（防自我循环）
             if is_bot:
                 return
-            if not text or not is_trigger(text, triggers):
+            if not text or not is_trigger(text, triggers, self._trigger_exact()):
                 return
 
             # 3) 查询并播报（date:YYYY-MM-DD = 指定日期）
